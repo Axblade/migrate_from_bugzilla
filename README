@@ -1,16 +1,20 @@
-This is a rake task to  convert your existing bugzilla database to
+This is a rake task to convert your existing bugzilla database to
 a redmine database. Bugzilla is a popular Bugtracking-System. Redmine
 is a increasingly popular bugtracking system as well. Compared with Bugzilla,
 Redmine has a couple of unique features.
 
 The task is based on the work of Arjen Roodselaar, Lindix bv.
+Edited by Eugene Sypachev, St.Petersburg, Russia.
 
 == Features
 
 * Keeps a Record of the original Bugzilla Bugnumbers
 * Converts most of the existing Bugzilla-Data including attachments
   and relations between issues.
-
+* Creates needed Custom Fields from Bugzillas fields (little editing is needed)
+* Moves values from Bugzillas custom fields to Redmine new custom fields
+* Asks for new project identifiers. If user value is blank, identifier is formed like project + bugzilla_project_id 
+  It was done to avoid validation errors with projects, named with language, other than english or with other than latin letters
 
 == Usage
 
@@ -20,5 +24,18 @@ The task is based on the work of Arjen Roodselaar, Lindix bv.
   The task will delete all of the data of your existing redmine installation.
 * If you are working on a new installation of redmine make shure you ran
   "rake redmine:load_default_data".
+ NB! If Redmine database is not blank (with default data only) - your data may be broken
+
+* If you need to move some custom fields you must edit script (see below) 
+ 
 * Run the script and enter the connection settings of your bugzilla database.
 
+== Editing the script to move custom fields
+
+* Open script for editing (in Linux: vi %Route_to_redmine_tasks_directory%/migrate_from_bugzilla.rake)
+* Find "CUSTOM_FIELDS =" string (about 120 line)
+* For each custom field add line like this: [position, name_of_redmine_field, name_of_bugzilla_field, "text", min_length, max_length] for text fields, 
+   [position, name_of_redmine_field, name_of_bugzilla_field, "text", min_length, max_length, list_of_bugzilla_values] for list fields
+* Add list field values above (about 110 line), like it is done for Severity Bugzillas field
+  NB!  You must add values of Bugzillas lists, othervise that values will be ignored by script
+* Save script

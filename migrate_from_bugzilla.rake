@@ -17,6 +17,8 @@
 #
 # Bugzilla migration by Arjen Roodselaar, Lindix bv
 #
+# Custom field migration code was added y Eugene Sypachev, St.Petersburg, Russia
+#
 
 desc 'Bugzilla migration script'
 
@@ -46,7 +48,7 @@ module ActiveRecord
 
       module BugzillaMigrate 
         DEFAULT_STATUS = IssueStatus.default
-        CLOSED_STATUS = IssueStatus.find :first, :conditions => { :is_closed => true }
+        CLOSED_STATUS = IssueStatus.find_by_position(5)
         assigned_status = IssueStatus.find_by_position(2)
         resolved_status = IssueStatus.find_by_position(3)
         feedback_status = IssueStatus.find_by_position(4)
@@ -54,11 +56,12 @@ module ActiveRecord
         STATUS_MAPPING = {
           "UNCONFIRMED" => DEFAULT_STATUS,
           "NEW" => DEFAULT_STATUS,
-          "VERIFIED" => DEFAULT_STATUS,
+          "VERIFIED" => assigned_status,
           "ASSIGNED" => assigned_status,
           "REOPENED" => assigned_status,
           "RESOLVED" => resolved_status,
           "CLOSED" => CLOSED_STATUS
+	  	  
         }
         # actually close resolved issues
         resolved_status.is_closed = true
@@ -66,13 +69,13 @@ module ActiveRecord
                         
         priorities = IssuePriority.all(:order => 'id')
         PRIORITY_MAPPING = {
-          "P1" => priorities[1], # low
-          "P2" => priorities[2], # normal
-          "P3" => priorities[3], # high
-          "P4" => priorities[4], # urgent
-          "P5" => priorities[5]  # immediate
+          "P5" => priorities[0], # low
+          "P4" => priorities[1], # normal
+          "P3" => priorities[2], # high
+          "P2" => priorities[3], # urgent
+          "P1" => priorities[4]  # immediate
         }
-        DEFAULT_PRIORITY = PRIORITY_MAPPING["P2"]
+        DEFAULT_PRIORITY = PRIORITY_MAPPING["P5"]
     
         TRACKER_BUG = Tracker.find_by_position(1)
         TRACKER_FEATURE = Tracker.find_by_position(2)
@@ -102,9 +105,22 @@ module ActiveRecord
           4 => IssueRelation::TYPE_DUPLICATES  # has duplicate
         }
 
-        BUGZILLA_ID_FIELDNAME = "Bugzilla-Id"
 
-        class BugzillaProfile < ActiveRecord::Base
+	# list of values for bugzilla Severity field
+	# values must be equal to bugzilla values
+	# othervise value will be blank
+	SEVERITY_LIST = ["blocker", "critical", "enhansement", "normal", "major", "minor", "trivial"]
+		
+		# custom field list
+		# values for text field:
+		# [position, name_of_redmine_field, name_of_bugzilla_field, "text", min_length, max_length]
+		# values for list field:
+		# [position, name_of_redmine_field, name_of_bugzilla_field, "text", min_length, max_length, list_of_bugzilla_values]
+		# list must be defined above, like "SEVERITY LIST"
+        CUSTOM_FIELDS = [[1, "Bugzilla ID", "id", "text", 0, 0],
+			[2, "Severity", "bug_severity", "list", 0, 0, SEVERITY_LIST]]
+
+	class BugzillaProfile < ActiveRecord::Base
           set_table_name :profiles
           set_primary_key :userid
         
@@ -115,7 +131,7 @@ module ActiveRecord
             :association_foreign_key => :group_id
         
           def login
-            login_name[0..29].gsub(/[^a-zA-Z0-9_\-@\.]/, '-')
+            login_name[0..50].gsub(/[^a-zA-Z0-9_\-@\.]/, '-') # it was 29
           end
         
           def email
@@ -247,15 +263,28 @@ module ActiveRecord
             klass.establish_connection params
           end
         end
-        
+       
+	    # 1 journal entry is formed for all custom fields
+		def self.create_journal_string(bug)
+			journal_string = ""
+			CUSTOM_FIELDS.each do |entity|
+				journal_string += "Value of custom field #{entity[1]} was #{bug.instance_variable_get("@" + entity[2].to_s)}.\n" unless entity[2].blank?
+			end
+			return journal_string
+		end
+ 
         def self.map_user(userid)
-           return @user_map[userid]
+            @user_map[userid]
         end
+		
+		def self.map_category(catid)
+			@category_map[catid]
+		end
+
+	
 
         def self.migrate_users
-          puts
-          print "Migrating profiles\n"
-          $stdout.flush
+          puts "Migrating profiles\n"
           
           # bugzilla userid => redmine user pk.  Use email address
           # as the matching mechanism.  If profile exists in redmine,
@@ -268,7 +297,6 @@ module ActiveRecord
             profile_email.strip!
             existing_redmine_user = User.find_by_mail(profile_email)
             if existing_redmine_user
-	      #puts "Existing Redmine User: \n #{existing_redmine_user.inspect}"
               @user_map[profile.userid] = existing_redmine_user.id
             else
               # create the new user with its own fresh pk
@@ -292,32 +320,49 @@ module ActiveRecord
               @user_map[profile.userid] = user.id
             end
           end
-          print '.'
+          puts '.'
           $stdout.flush
         end
         
         def self.migrate_products
-          puts
-          print "Migrating products"
-          $stdout.flush
+          puts "Migrating products"
           
           @project_map = {}
           
           BugzillaProduct.find_each do |product|
             project = Project.new
             # project.pk = product.id
-            project.name = product.name
+            project.id = product.id
+		project.name = product.name
             project.description = product.description
-            project.identifier = product.name.downcase.gsub(/[^a-zA-Z0-9]+/, '-')[0..19]
-            project.save!
-            
+         
+		print "Please, enter identifier for project #{product.name} (default will be project and id string)"
+		identifier_value = STDIN.gets
+	unless identifier_value.blank?
+		project.identifier = identifier_value
+	else
+		project.identifier = "project" + "#{product.id}"
+	end
+
+            unless project.save 
+				puts "Failure saving product"
+				puts "product: #{product.name}"
+				validation_errors = product.errors.collect { |e| e.to_s}.join(", ")
+				puts "validation errors: #{validation_errors}"
+			end
+            puts product.name + " saved"
             @project_map[product.id] = project.id
             
-            print '.'
-            $stdout.flush
-
+			
             product.versions.each do |version|
-              Version.create(:name => version.value, :project => project)
+              unless Version.create(:name => version.value, :project => project) then
+			  	puts "Failure saving version"
+				puts "product: #{product.name}"
+				puts "version: #{product.version.value}"
+				validation_errors = product.version.errors.collect { |e| e.to_s}.join(", ")
+				puts "validation errors: #{validation_errors}"
+			  end
+			  #puts version.value + " saved"
             end
             
             # Enable issue tracking
@@ -325,27 +370,22 @@ module ActiveRecord
               :project => project,
               :name => 'issue_tracking'
             )
-            enabled_module.save!
-
+            enabled_module.save
+			
             # Components
             @category_map = {}
             product.components.each do |component|
-              # assume all components become a new category
               
-              category = IssueCategory.new(:name => component.name[0,30])
-              #category.pk = component.id
-              category.project = project
-		# puts "User mapping is: #{@user_map.inspect}"
-	        # puts "component owner = #{component.initialowner} mapped to user #{map_user(component.initialowner)}"
-              uid = map_user(component.initialowner)
-              category.assigned_to = User.first(:conditions => {:id => uid })
-              category.save
-              @category_map[component.id] = category.id
-            end
+				category = IssueCategory.new(:name => component.name[0,50]) 
+				category.project = project
+				uid = map_user(component.initialowner)
+				category.id = component.id
+				category.assigned_to = User.first(:conditions => {:id => uid })
+				category.save
 
-            Tracker.find_each do |tracker|
-              project.trackers << tracker
-            end
+				@category_map[component.id] = category.id          
+			end
+
 
             User.find_each do |user|
               membership = Member.new(
@@ -357,20 +397,19 @@ module ActiveRecord
             end
           
           end
-
+			puts "."
+			$stdout.flush
         end
 
         def self.migrate_issues()
-          puts
-          print "Migrating issues"
+          puts "Migrating issues"
           
           # Issue.destroy_all
           @issue_map = {}
-
-          custom_field = IssueCustomField.find_by_name(BUGZILLA_ID_FIELDNAME)
           
-          BugzillaBug.find(:all, :order => "bug_id ASC").each  do |bug|
-            #puts "Processing bugzilla bug #{bug.bug_id}"
+          BugzillaBug.find(:all, :order => :bug_id).each  do |bug|
+
+            puts "Processing bugzilla bug #{bug.bug_id}"
             description = bug.descriptions.first.text.to_s
 
             issue = Issue.new(
@@ -383,16 +422,17 @@ module ActiveRecord
               :start_date => bug.creation_ts,
               :created_on => bug.creation_ts,
               :updated_on => bug.delta_ts
-            )
-            
+		)
+           
+	   
             issue.tracker = TRACKER_BUG
-            # issue.category_id = @category_map[bug.component_id]
-            
-            issue.category_id =  @category_map[bug.component_id] unless bug.component_id.blank?
+	   
+	    issue.category_id = bug.component_id unless bug.component_id.blank?
+
             issue.assigned_to_id = map_user(bug.assigned_to) unless bug.assigned_to.blank?
             version = Version.first(:conditions => {:project_id => @project_map[bug.product_id], :name => bug.version })
             issue.fixed_version = version
-            
+           
             issue.save!
             #puts "Redmine issue number is #{issue.id}"
             @issue_map[bug.bug_id] = issue.id
@@ -414,13 +454,19 @@ module ActiveRecord
             journal = Journal.new(
               :journalized => issue,
               :user_id => 1,
-              :notes => "Original Bugzilla ID was #{bug.id}"
+              :notes => "#{create_journal_string(bug)}"
             )
             journal.save!
 
-            # Additionally save the original bugzilla bug ID as custom field value.
-            issue.custom_field_values = { custom_field.id => "#{bug.id}" }
-            issue.save_custom_field_values
+ # Additionally save the original bugzilla bug ID as custom field value.
+
+		# moves values from bugzilla custom fields to new redmine fileds
+		# bugzilla custom field values are found by name of custom field (for example cf_time)
+		# redmine fields are found with position identifier
+		CUSTOM_FIELDS.each do |entity|
+			issue.custom_field_values = {entity[0] => "#{bug.instance_variable_get("@" + entity[2].to_s)}"} unless (bug.instance_variable_get("@" + entity[2].to_s)).blank?
+		end
+	    issue.save_custom_field_values
 
             print '.'
             $stdout.flush
@@ -428,8 +474,7 @@ module ActiveRecord
         end
         
         def self.migrate_attachments()
-          puts 
-          print "Migrating attachments"
+          puts  "Migrating attachments"
           BugzillaAttachment.find_each() do |attachment|
             next if attachment.attach_data.nil?
             a = Attachment.new :created_on => attachment.creation_ts
@@ -444,8 +489,7 @@ module ActiveRecord
         end
 
         def self.migrate_issue_relations()
-          puts
-          print "Migrating issue relations"
+          puts "Migrating issue relations"
           BugzillaDependency.find_by_sql("select blocked, dependson from dependencies").each do |dep|
             rel = IssueRelation.new
             rel.issue_from_id = @issue_map[dep.blocked]
@@ -467,28 +511,55 @@ module ActiveRecord
           end
         end
 
-        def self.create_custom_bug_id_field
-           custom = IssueCustomField.find_by_name(BUGZILLA_ID_FIELDNAME)
-           return if custom
-           custom = IssueCustomField.new({:regexp => "",
-                                          :position => 1,
-                                          :name => BUGZILLA_ID_FIELDNAME,
-                                          :is_required => false,
-                                          :min_length => 0,
-                                          :default_value => "",
-                                          :searchable =>true,
-                                          :is_for_all => true,
-                                          :max_length => 0, 
-                                          :is_filter => true, 
-                                          :editable => true, 
-                                          :field_format => "string" })
-           custom.save!
+	
+	# method for creating redmine custom text fields
+	def self.create_custom_text_field(position, field_name, min_length, max_length)
+		custom = IssueCustomField.find_by_name(field_name)
+		return if custom
+		custom = IssueCustomField.new({:regexp => "",
+					:position => position,
+					:name => field_name,
+					:is_required => false,
+					:min_length => min_length,
+					:default_value => "",
+					:searchable => true,
+					:is_for_all => true,
+					:max_length => max_length,
+					:is_filter => true,
+					:editable => true,
+					:field_format => "string"})
+		custom.save!
+		
+		Tracker.all.each do |t|
+			t.custom_fields << custom
+			t.save!
+		end
+		puts "Custom field #{field_name} was created!"
+	end 
 
-           Tracker.all.each do |t|
-             t.custom_fields << custom
-             t.save!
-           end
-        end
+    # method for creating redmine custom list fields
+	def self.create_custom_list_field(position, field_name, possible_values)
+		custom = IssueCustomField.find_by_name(field_name)
+		return if custom
+		custom = IssueCustomField.new({:regexp => "",
+					:position => position,
+					:name => field_name,
+					:is_required => false,
+					:possible_values => possible_values,
+					:default_value => "",
+					:searchable => true,
+					:is_for_all => true,
+					:is_filter => true,
+					:editable => true,
+					:field_format => "list"})
+		custom.save!
+
+		Tracker.all.each do |t|
+			t.custom_fields << custom
+			t.save!
+		end
+		puts "Custom field #{field_name} was created!"
+	end
 
         puts
         puts "WARNING: Your Redmine data could be corrupted during this process."
@@ -500,13 +571,14 @@ module ActiveRecord
           :database => 'bugs',
           :host => 'localhost',
           :port => 3306,
-          :username => '',
-          :password => '',
+		  :socket => '/var/run/mysqld/mysqld.sock',
+          :username => 'root',
+          :password => '123456',
           :encoding => 'utf8'}
 
         puts
         puts "Please enter settings for your Bugzilla database"
-        [:adapter, :host, :port, :database, :username, :password].each do |param|
+        [:adapter, :host, :port, :database, :socket, :username, :password].each do |param|
             print "#{param} [#{db_params[param]}]: "
             value = STDIN.gets.chomp!
             value = value.to_i if param == :port
@@ -521,12 +593,19 @@ module ActiveRecord
 
      
         BugzillaMigrate.establish_connection db_params
-        BugzillaMigrate.create_custom_bug_id_field
-        BugzillaMigrate.migrate_users
+        
+		#create custom fields
+		CUSTOM_FIELDS.each do |entity|
+			BugzillaMigrate.create_custom_text_field(entity[0], entity[1], entity[4], entity[5]) if entity[3] == "text"
+			BugzillaMigrate.create_custom_list_field(entity[0], entity[1], entity[6]) if entity[3] == "list"
+		end
+
+		BugzillaMigrate.migrate_users
         BugzillaMigrate.migrate_products
         BugzillaMigrate.migrate_issues
         BugzillaMigrate.migrate_attachments
         BugzillaMigrate.migrate_issue_relations
+ 
       end   
     end
   end
