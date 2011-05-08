@@ -38,4 +38,4 @@ Edited by Eugene Sypachev, St.Petersburg, Russia.
    [position, name_of_redmine_field, name_of_bugzilla_field, "text", min_length, max_length, list_of_bugzilla_values] for list fields
 * Add list field values above (about 110 line), like it is done for Severity Bugzillas field
   NB!  You must add values of Bugzillas lists, othervise that values will be ignored by script
-* Save script
+* Save script, now you can run it, all your data will be transfered
